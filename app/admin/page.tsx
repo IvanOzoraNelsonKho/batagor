@@ -5,11 +5,11 @@ import { getContent, getQuestions } from "../lib/db";
 export const dynamic = "force-dynamic";
 
 // Server Component: membaca data dari SQLite, lalu mengirimnya ke editor (client)
-export default function AdminPage() {
+export default async function AdminPage() {
   return (
     <AdminEditor
-      initialQuestions={getQuestions()}
-      initialContent={getContent()}
+      initialQuestions={await getQuestions()}
+      initialContent={await getContent()}
     />
   );
 }

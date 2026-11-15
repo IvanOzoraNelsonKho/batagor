@@ -4,7 +4,7 @@ import { parseContent } from "../../lib/validate";
 
 // GET /api/content -> semua teks yang bisa diedit admin
 export async function GET() {
-  return NextResponse.json(getContent());
+  return NextResponse.json(await getContent());
 }
 
 // PUT /api/content -> simpan perubahan teks
@@ -16,11 +16,11 @@ export async function PUT(request: Request) {
       { status: 400 },
     );
   }
-  saveContent(content);
-  return NextResponse.json(getContent());
+  await saveContent(content);
+  return NextResponse.json(await getContent());
 }
 
 // DELETE /api/content -> kembalikan semua teks ke bawaan
 export async function DELETE() {
-  return NextResponse.json(resetContent());
+  return NextResponse.json(await resetContent());
 }

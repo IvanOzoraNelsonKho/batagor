@@ -11,12 +11,12 @@ import "./extras.css";
 export const dynamic = "force-dynamic";
 
 // Server Component: teks beranda/sejarah dibaca dari database SQLite
-export default function SiteLayout({
+export default async function SiteLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const content = getContent();
+  const content = await getContent();
 
   return (
     <LanguageProvider content={content}>

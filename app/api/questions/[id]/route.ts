@@ -18,7 +18,7 @@ export async function PUT(request: Request, { params }: Context) {
       { status: 400 },
     );
   }
-  const updated = updateQuestion(id, question);
+  const updated = await updateQuestion(id, question);
   if (!updated) {
     return NextResponse.json(
       { error: "Soal tidak ditemukan." },
@@ -34,13 +34,13 @@ export async function DELETE(_request: Request, { params }: Context) {
   if (!Number.isInteger(id)) {
     return NextResponse.json({ error: "ID tidak valid." }, { status: 400 });
   }
-  if (countQuestions() <= 1) {
+  if ((await countQuestions()) <= 1) {
     return NextResponse.json(
       { error: "Kuis harus memiliki minimal satu soal." },
       { status: 400 },
     );
   }
-  if (!deleteQuestion(id)) {
+  if (!(await deleteQuestion(id))) {
     return NextResponse.json(
       { error: "Soal tidak ditemukan." },
       { status: 404 },

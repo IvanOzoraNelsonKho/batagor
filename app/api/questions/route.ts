@@ -4,7 +4,7 @@ import { parseQuestion } from "../../lib/validate";
 
 // GET /api/questions  -> semua soal
 export async function GET() {
-  return NextResponse.json(getQuestions());
+  return NextResponse.json(await getQuestions());
 }
 
 // POST /api/questions -> tambah soal baru
@@ -16,5 +16,5 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
-  return NextResponse.json(createQuestion(question), { status: 201 });
+  return NextResponse.json(await createQuestion(question), { status: 201 });
 }

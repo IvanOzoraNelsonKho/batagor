@@ -1,7 +1,7 @@
-// Lapisan database SQLite (hanya dipakai di server: API route & Server Component).
-// Pengganti lib/store.ts yang dulu memakai localStorage.
-import Database from "better-sqlite3";
-import path from "node:path";
+// Lapisan database (hanya dipakai di server: API route & Server Component).
+// Versi Turso/libSQL: SQL-nya tetap SQLite, tapi semua fungsi sekarang ASYNC.
+// Tanpa variabel env, otomatis memakai file lokal batagor.db (untuk npm run dev).
+import { createClient, type Client, type InStatement } from "@libsql/client";
 import {
   defaultContent,
   defaultQuestions,
@@ -11,168 +11,176 @@ import {
 } from "./data";
 import type { StoredQuestion } from "./types";
 
-// Saat `next dev`, file ini bisa dimuat ulang berkali-kali (hot reload).
-// Koneksi disimpan di globalThis supaya tidak membuka database berulang-ulang.
-const globalForDb = globalThis as unknown as { batagorDb?: Database.Database };
+// Simpan koneksi di globalThis supaya hot reload tidak membuat koneksi baru.
+const globalForDb = globalThis as unknown as {
+  batagorDb?: Client;
+  batagorReady?: Promise<void>;
+};
 
-function createDb(): Database.Database {
-  // File database dibuat otomatis di folder utama project
-  const db = new Database(path.join(process.cwd(), "batagor.db"));
-  db.pragma("journal_mode = WAL");
+function getClient(): Client {
+  if (!globalForDb.batagorDb) {
+    globalForDb.batagorDb = createClient({
+      url: process.env.TURSO_DATABASE_URL ?? "file:batagor.db",
+      authToken: process.env.TURSO_AUTH_TOKEN,
+    });
+  }
+  return globalForDb.batagorDb;
+}
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS questions (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      question_id TEXT    NOT NULL,   -- teks soal (Indonesia)
-      question_en TEXT    NOT NULL,   -- teks soal (Inggris)
-      options     TEXT    NOT NULL,   -- 4 pilihan jawaban, disimpan sebagai JSON
-      answer      INTEGER NOT NULL    -- index jawaban benar (0-3)
-    );
-
-    CREATE TABLE IF NOT EXISTS content (
-      key     TEXT PRIMARY KEY,       -- contoh: homeTitle
-      text_id TEXT NOT NULL,
-      text_en TEXT NOT NULL
-    );
-  `);
-
-  seed(db);
+// Buat tabel + isi data awal (sekali per proses), lalu kembalikan koneksi.
+async function getDb(): Promise<Client> {
+  const db = getClient();
+  if (!globalForDb.batagorReady) {
+    globalForDb.batagorReady = init(db).catch((error) => {
+      globalForDb.batagorReady = undefined; // izinkan coba lagi
+      throw error;
+    });
+  }
+  await globalForDb.batagorReady;
   return db;
 }
 
-// Isi data awal hanya jika tabel masih kosong
-function seed(db: Database.Database) {
-  const { total } = db
-    .prepare("SELECT COUNT(*) AS total FROM questions")
-    .get() as {
-    total: number;
-  };
-
-  const insertQuestion = db.prepare(
-    "INSERT INTO questions (question_id, question_en, options, answer) VALUES (?, ?, ?, ?)",
+async function init(db: Client): Promise<void> {
+  await db.batch(
+    [
+      `CREATE TABLE IF NOT EXISTS questions (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        question_id TEXT    NOT NULL,
+        question_en TEXT    NOT NULL,
+        options     TEXT    NOT NULL,
+        answer      INTEGER NOT NULL
+      )`,
+      `CREATE TABLE IF NOT EXISTS content (
+        key     TEXT PRIMARY KEY,
+        text_id TEXT NOT NULL,
+        text_en TEXT NOT NULL
+      )`,
+    ],
+    "write",
   );
-  const insertContent = db.prepare(
-    "INSERT OR IGNORE INTO content (key, text_id, text_en) VALUES (?, ?, ?)",
-  );
 
-  db.transaction(() => {
-    if (total === 0) {
-      for (const q of defaultQuestions) {
-        insertQuestion.run(
+  const count = await db.execute("SELECT COUNT(*) AS total FROM questions");
+  const statements: InStatement[] = [];
+  if (Number(count.rows[0].total) === 0) {
+    for (const q of defaultQuestions) {
+      statements.push({
+        sql: "INSERT INTO questions (question_id, question_en, options, answer) VALUES (?, ?, ?, ?)",
+        args: [
           q.question.id,
           q.question.en,
           JSON.stringify(q.options),
           q.answer,
-        );
-      }
+        ],
+      });
     }
-    for (const [key, text] of Object.entries(defaultContent)) {
-      insertContent.run(key, text.id, text.en);
-    }
-  })();
-}
-
-function getDb(): Database.Database {
-  if (!globalForDb.batagorDb) globalForDb.batagorDb = createDb();
-  return globalForDb.batagorDb;
+  }
+  for (const [key, text] of Object.entries(defaultContent)) {
+    statements.push({
+      sql: "INSERT OR IGNORE INTO content (key, text_id, text_en) VALUES (?, ?, ?)",
+      args: [key, text.id, text.en],
+    });
+  }
+  if (statements.length > 0) await db.batch(statements, "write");
 }
 
 /* ===================== SOAL KUIS ===================== */
 
-interface QuestionRow {
-  id: number;
-  question_id: string;
-  question_en: string;
-  options: string;
-  answer: number;
-}
-
-function toQuestion(row: QuestionRow): StoredQuestion {
+function toQuestion(row: Record<string, unknown>): StoredQuestion {
   return {
-    id: row.id,
-    question: { id: row.question_id, en: row.question_en },
-    options: JSON.parse(row.options) as Bi[],
-    answer: row.answer,
+    id: Number(row.id),
+    question: { id: String(row.question_id), en: String(row.question_en) },
+    options: JSON.parse(String(row.options)) as Bi[],
+    answer: Number(row.answer),
   };
 }
 
-export function getQuestions(): StoredQuestion[] {
-  const rows = getDb()
-    .prepare("SELECT * FROM questions ORDER BY id")
-    .all() as QuestionRow[];
-  return rows.map(toQuestion);
+export async function getQuestions(): Promise<StoredQuestion[]> {
+  const db = await getDb();
+  const result = await db.execute("SELECT * FROM questions ORDER BY id");
+  return result.rows.map(toQuestion);
 }
 
-export function countQuestions(): number {
-  const row = getDb()
-    .prepare("SELECT COUNT(*) AS total FROM questions")
-    .get() as { total: number };
-  return row.total;
+export async function countQuestions(): Promise<number> {
+  const db = await getDb();
+  const result = await db.execute("SELECT COUNT(*) AS total FROM questions");
+  return Number(result.rows[0].total);
 }
 
-export function createQuestion(q: QuizQuestion): StoredQuestion {
-  const result = getDb()
-    .prepare(
-      "INSERT INTO questions (question_id, question_en, options, answer) VALUES (?, ?, ?, ?)",
-    )
-    .run(q.question.id, q.question.en, JSON.stringify(q.options), q.answer);
+export async function createQuestion(q: QuizQuestion): Promise<StoredQuestion> {
+  const db = await getDb();
+  const result = await db.execute({
+    sql: "INSERT INTO questions (question_id, question_en, options, answer) VALUES (?, ?, ?, ?)",
+    args: [q.question.id, q.question.en, JSON.stringify(q.options), q.answer],
+  });
   return { ...q, id: Number(result.lastInsertRowid) };
 }
 
-export function updateQuestion(
+export async function updateQuestion(
   id: number,
   q: QuizQuestion,
-): StoredQuestion | null {
-  const result = getDb()
-    .prepare(
-      "UPDATE questions SET question_id = ?, question_en = ?, options = ?, answer = ? WHERE id = ?",
-    )
-    .run(q.question.id, q.question.en, JSON.stringify(q.options), q.answer, id);
-  return result.changes > 0 ? { ...q, id } : null;
+): Promise<StoredQuestion | null> {
+  const db = await getDb();
+  const result = await db.execute({
+    sql: "UPDATE questions SET question_id = ?, question_en = ?, options = ?, answer = ? WHERE id = ?",
+    args: [
+      q.question.id,
+      q.question.en,
+      JSON.stringify(q.options),
+      q.answer,
+      id,
+    ],
+  });
+  return result.rowsAffected > 0 ? { ...q, id } : null;
 }
 
-export function deleteQuestion(id: number): boolean {
-  return (
-    getDb().prepare("DELETE FROM questions WHERE id = ?").run(id).changes > 0
-  );
+export async function deleteQuestion(id: number): Promise<boolean> {
+  const db = await getDb();
+  const result = await db.execute({
+    sql: "DELETE FROM questions WHERE id = ?",
+    args: [id],
+  });
+  return result.rowsAffected > 0;
 }
 
 /* ===================== TEKS KONTEN ===================== */
 
-interface ContentRow {
-  key: ContentKey;
-  text_id: string;
-  text_en: string;
+function upsertStatements(content: Record<ContentKey, Bi>): InStatement[] {
+  return Object.entries(content).map(([key, text]) => ({
+    sql: `INSERT INTO content (key, text_id, text_en) VALUES (?, ?, ?)
+          ON CONFLICT(key) DO UPDATE SET text_id = excluded.text_id, text_en = excluded.text_en`,
+    args: [key, text.id, text.en],
+  }));
 }
 
-export function getContent(): Record<ContentKey, Bi> {
-  const rows = getDb().prepare("SELECT * FROM content").all() as ContentRow[];
+export async function getContent(): Promise<Record<ContentKey, Bi>> {
+  const db = await getDb();
+  const result = await db.execute("SELECT * FROM content");
   // Mulai dari teks bawaan, lalu timpa dengan yang ada di database
   const content = JSON.parse(JSON.stringify(defaultContent)) as Record<
     ContentKey,
     Bi
   >;
-  for (const row of rows) {
-    if (row.key in content)
-      content[row.key] = { id: row.text_id, en: row.text_en };
+  for (const row of result.rows) {
+    const key = String(row.key) as ContentKey;
+    if (key in content) {
+      content[key] = { id: String(row.text_id), en: String(row.text_en) };
+    }
   }
   return content;
 }
 
-export function saveContent(content: Record<ContentKey, Bi>): void {
-  const upsert = getDb().prepare(
-    `INSERT INTO content (key, text_id, text_en) VALUES (?, ?, ?)
-     ON CONFLICT(key) DO UPDATE SET text_id = excluded.text_id, text_en = excluded.text_en`,
-  );
-  getDb().transaction(() => {
-    for (const [key, text] of Object.entries(content)) {
-      upsert.run(key, text.id, text.en);
-    }
-  })();
+export async function saveContent(
+  content: Record<ContentKey, Bi>,
+): Promise<void> {
+  const db = await getDb();
+  await db.batch(upsertStatements(content), "write");
 }
 
-export function resetContent(): Record<ContentKey, Bi> {
-  getDb().prepare("DELETE FROM content").run();
-  saveContent(defaultContent);
+export async function resetContent(): Promise<Record<ContentKey, Bi>> {
+  const db = await getDb();
+  await db.batch(
+    ["DELETE FROM content", ...upsertStatements(defaultContent)],
+    "write",
+  );
   return getContent();
 }
